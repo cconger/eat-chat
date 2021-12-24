@@ -38,13 +38,21 @@ fn vs_main(
 
   var translated: vec2<f32> = ((pos + size) * vec2<f32>(2.0/projection.size.x, -2.0/projection.size.y)) + vec2<f32>(-1.0, 1.0);
 
-  out.tex_coords = instance.tex_offset;
+  out.tex_coords = model.position;
   out.clip_position = vec4<f32>(translated, 0.0, 1.0);
-  out.color = instance.color;
+  out.color = vec3<f32>(model.position.xy, 0.0);
+  //out.color = instance.color;
   return out;
 }
 
+[[group(1), binding(0)]]
+var t_diffuse: texture_2d<f32>;
+[[group(1), binding(1)]]
+var s_diffuse: sampler;
+
 [[stage(fragment)]]
 fn fs_main(in: VertexOutput) -> [[location(0)]] vec4<f32> {
-  return vec4<f32>(in.color, 1.0);
+  return textureSample(t_diffuse, s_diffuse, in.tex_coords);
+
+  //return vec4<f32>(in.color, 1.0);
 }
