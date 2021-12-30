@@ -37,22 +37,6 @@ struct ProjectionUniform {
     offset: [f32; 2],
 }
 
-impl ProjectionUniform {
-    fn new(width: u32, height: u32, cell_width: f32, cell_height: f32) -> Self {
-        Self {
-            cell_dim: [cell_width, cell_height],
-            size: [width as f32, height as f32],
-            offset: [0.0, 0.0],
-        }
-    }
-
-    fn update(&mut self, width: u32, height: u32) {
-        println!("{} {}", width, height);
-        self.size[0] = width as f32;
-        self.size[1] = height as f32;
-    }
-}
-
 const VERTICES: &[Vertex] = &[
     // Top Left
     Vertex {
@@ -74,28 +58,15 @@ const VERTICES: &[Vertex] = &[
 
 const INDICES: &[u16] = &[0,2,1,2,0,3];
 
-struct Instance {
-    cell_coords: [u32;2],
-    tex_offset: [f32;2],
-    color: [f32;3],
-}
-
-impl Instance {
-    fn to_raw(&self) -> InstanceRaw {
-        InstanceRaw {
-            cell_coords: [self.cell_coords[0] as f32, self.cell_coords[1] as f32],
-            tex_offset: self.tex_offset,
-            color: self.color,
-        }
-    }
-}
-
 #[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct InstanceRaw {
     cell_coords: [f32;2],
     tex_offset: [f32;2],
-    color: [f32;3],
+    tex_size: [f32;2],
+    bg_color: [f32;3],
+    fg_color: [f32;4],
+    position: [f32;4],
 }
 
 impl InstanceRaw {
@@ -118,11 +89,101 @@ impl InstanceRaw {
                 wgpu::VertexAttribute {
                     offset: mem::size_of::<[f32;4]>() as wgpu::BufferAddress,
                     shader_location: 7,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32;6]>() as wgpu::BufferAddress,
+                    shader_location: 8,
                     format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32;9]>() as wgpu::BufferAddress,
+                    shader_location: 9,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32;13]>() as wgpu::BufferAddress,
+                    shader_location: 10,
+                    format: wgpu::VertexFormat::Float32x4,
                 },
             ],
         }
     }
+}
+
+struct Screen {
+    offset_x: u32,
+    offset_y: u32,
+    width: u32,
+    height: u32,
+    cell_width: f32,
+    cell_height: f32,
+    cells: Vec<Cell>,
+}
+
+impl Screen {
+    fn new(offset_x: u32, offset_y: u32, width: u32, height: u32, cell_width: f32, cell_height: f32) -> Self {
+        Self{
+            offset_x,
+            offset_y,
+            width,
+            height,
+            cell_width,
+            cell_height,
+            cells: Vec::new(),
+        }
+    }
+
+    fn update(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+    }
+
+    fn projection_uniform(&self) -> ProjectionUniform {
+        ProjectionUniform {
+            cell_dim: [self.cell_width, self.cell_height],
+            size: [self.width as f32, self.height as f32],
+            offset: [self.offset_x as f32, self.offset_y as f32],
+        }
+    }
+
+    fn instance_data(&self) -> Vec<InstanceRaw> {
+        self.cells.iter().map(Cell::to_instance).collect::<Vec<_>>()
+    }
+}
+
+struct Cell {
+    col: u32,
+    row: u32,
+    bg_color: [f32;3],
+    fg_color: [f32;4],
+    glyph: Glyph,
+    top: f32,
+    left: f32,
+    width: f32,
+    height: f32,
+}
+
+
+impl Cell {
+    fn to_instance(&self) -> InstanceRaw {
+        InstanceRaw {
+            cell_coords: [self.col as f32, self.row as f32],
+            tex_offset: [self.glyph.uv_left, self.glyph.uv_top],
+            tex_size: [self.glyph.uv_width, self.glyph.uv_height],
+            bg_color: self.bg_color,
+            fg_color: self.fg_color,
+            position: [self.left, self.top, self.width, self.height],
+        }
+    }
+}
+
+struct Glyph {
+    key: GlyphKey,
+    uv_top: f32,
+    uv_left: f32,
+    uv_width: f32,
+    uv_height: f32,
 }
 
 
@@ -133,12 +194,12 @@ struct State {
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
     render_pipeline: wgpu::RenderPipeline,
+    bg_render_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
-    instances: Vec<Instance>,
+    screen: Screen,
     instance_buffer: wgpu::Buffer,
-    projection_uniform: ProjectionUniform,
     projection_buffer: wgpu::Buffer,
     projection_bind_group: wgpu::BindGroup,
     diffuse_bind_group: wgpu::BindGroup,
@@ -182,28 +243,6 @@ impl State {
         });
 
 
-        let instances: Vec<Instance> = (0..2400).map(|i| {
-            let y = i / 40;
-            let x = i % 40;
-
-            Instance{
-                cell_coords: [x, y],
-                tex_offset: [0.0, 0.0],
-                color: [
-                    rand::random::<f32>(),
-                    rand::random::<f32>(),
-                    rand::random::<f32>(),
-                ]
-            }
-        }).collect();
-
-        let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
-        let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Instance Buffer"),
-            contents: bytemuck::cast_slice(&instance_data),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
             contents: bytemuck::cast_slice(VERTICES),
@@ -221,27 +260,28 @@ impl State {
         let mut rasterizer = Rasterizer::new(scale_factor, true).unwrap();
 
         let font_desc = FontDesc::new::<String>(
-            "Menlo".into(),
+            "SF Mono".into(),
             Style::Description{
                 slant: Slant::Normal,
                 weight: Weight::Normal,
             });
-        let font_size = Size::new(30.0);
+        let font_size = Size::new(20.0);
         let regular = rasterizer.load_font(&font_desc, font_size).unwrap();
-        let m_glyph = rasterizer.get_glyph(GlyphKey { font_key: regular, character: '🙃', size: font_size}).unwrap();
-        //let metrics = rasterizer.metrics(regular, font_size).unwrap();
-        //println!("Average Advance: {}", metrics.average_advance);
-        //println!("Line Height    : {}", metrics.line_height);
-        //println!("Descent        : {}", metrics.descent);
-        //println!("Underline Pos  : {}", metrics.underline_position);
-        //println!("Underline Thick: {}", metrics.underline_thickness);
-        //println!("Strikeout Pos  : {}", metrics.strikeout_position);
-        //println!("Strikeout Thick: {}", metrics.strikeout_thickness);
+        let gk = GlyphKey { font_key: regular, character: 'm', size: font_size };
+        let m_glyph = rasterizer.get_glyph(gk).unwrap();
+        let metrics = rasterizer.metrics(regular, font_size).unwrap();
+        println!("Average Advance: {}", metrics.average_advance);
+        println!("Line Height    : {}", metrics.line_height);
+        println!("Descent        : {}", metrics.descent);
+        println!("Underline Pos  : {}", metrics.underline_position);
+        println!("Underline Thick: {}", metrics.underline_thickness);
+        println!("Strikeout Pos  : {}", metrics.strikeout_position);
+        println!("Strikeout Thick: {}", metrics.strikeout_thickness);
 
-        //println!("Glyph {} Width : {}", m_glyph.character, m_glyph.width);
-        //println!("Glyph {} Height: {}", m_glyph.character, m_glyph.height);
-        //println!("Glyph {} Top   : {}", m_glyph.character, m_glyph.top);
-        //println!("Glyph {} Left  : {}", m_glyph.character, m_glyph.left);
+        println!("Glyph {} Width : {}", m_glyph.character, m_glyph.width);
+        println!("Glyph {} Height: {}", m_glyph.character, m_glyph.height);
+        println!("Glyph {} Top   : {}", m_glyph.character, m_glyph.top);
+        println!("Glyph {} Left  : {}", m_glyph.character, m_glyph.left);
 
         // Load m_glyph as a texture
         let texture_size = wgpu::Extent3d {
@@ -254,7 +294,7 @@ impl State {
                 // All textures are stored as 3D, we represent our 2D texture
                 // by setting depth to 1.
                 size: texture_size,
-                mip_level_count: 1, // We'll talk about this a little later
+                mip_level_count: 1, 
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 // Most images are stored using sRGB so we need to reflect that here.
@@ -280,7 +320,7 @@ impl State {
                             new_buff.push(r);
                             new_buff.push(g);
                             new_buff.push(b);
-                            new_buff.push(255);
+                            new_buff.push(std::cmp::max(std::cmp::max(r,g),b));
                         }
                         _ => println!("Not chunk aligned"),
                     }
@@ -290,8 +330,8 @@ impl State {
             },
         };
 
-        println!("Glyph {} Buffer Len: {}", m_glyph.character, buff.len());
-        println!("Glyph {} Buffer: {:?}", m_glyph.character, buff);
+        //println!("Glyph {} Buffer Len: {}", m_glyph.character, buff.len());
+        //println!("Glyph {} Buffer: {:?}", m_glyph.character, buff);
 
         queue.write_texture(
             // Tells wgpu where to copy the pixel data
@@ -321,6 +361,110 @@ impl State {
             min_filter: wgpu::FilterMode::Nearest,
             mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
+        });
+
+        let mut screen = Screen::new(
+            0,0,
+            size.width,
+            size.height,
+            metrics.average_advance as f32,
+            metrics.line_height as f32,
+            );
+
+        let middle_cell = Cell {
+            col: 1,
+            row: 1,
+            bg_color: [0.0,0.0,0.0],
+            fg_color: [1.0,0.0,0.0,1.0],
+            glyph: Glyph {
+                key: gk,
+                uv_top: 0.0,
+                uv_left: 0.0,
+                uv_height: 1.0,
+                uv_width: 1.0,
+            },
+            width: m_glyph.width as f32,
+            height: m_glyph.height as f32,
+            top: m_glyph.top as f32 - metrics.descent,
+            left: m_glyph.left as f32,
+        };
+
+        println!("Middle Cell: {:?}", middle_cell.to_instance());
+
+        screen.cells.push(Cell {
+            col: 1,
+            row: 0,
+            bg_color: [0.0,0.0,0.0],
+            fg_color: [1.0,1.0,1.0,1.0],
+            glyph: Glyph {
+                key: gk,
+                uv_top: 0.0,
+                uv_left: 0.0,
+                uv_height: 1.0,
+                uv_width: 1.0,
+            },
+            width: m_glyph.width as f32,
+            height: m_glyph.height as f32,
+            top: m_glyph.top as f32 - metrics.descent,
+            left: m_glyph.left as f32,
+        });
+        screen.cells.push(Cell {
+            col: 0,
+            row: 1,
+            bg_color: [0.0,0.0,0.0],
+            fg_color: [1.0,1.0,1.0,0.5],
+            glyph: Glyph {
+                key: gk,
+                uv_top: 0.0,
+                uv_left: 0.0,
+                uv_height: 1.0,
+                uv_width: 1.0,
+            },
+            width: m_glyph.width as f32,
+            height: m_glyph.height as f32,
+            top: m_glyph.top as f32 - metrics.descent,
+            left: m_glyph.left as f32,
+        });
+        screen.cells.push(middle_cell);
+        screen.cells.push(Cell {
+            col: 2,
+            row: 1,
+            bg_color: [0.0,0.0,0.0],
+            fg_color: [1.0,1.0,1.0,0.5],
+            glyph: Glyph {
+                key: gk,
+                uv_top: 0.0,
+                uv_left: 0.0,
+                uv_height: 1.0,
+                uv_width: 1.0,
+            },
+            width: m_glyph.width as f32,
+            height: m_glyph.height as f32,
+            top: m_glyph.top as f32 - metrics.descent,
+            left: m_glyph.left as f32,
+        });
+        screen.cells.push(Cell {
+            col: 1,
+            row: 2,
+            bg_color: [0.0,0.0,0.0],
+            fg_color: [1.0,1.0,1.0,0.5],
+            glyph: Glyph {
+                key: gk,
+                uv_top: 0.0,
+                uv_left: 0.0,
+                uv_height: 1.0,
+                uv_width: 1.0,
+            },
+            width: m_glyph.width as f32,
+            height: m_glyph.height as f32,
+            top: m_glyph.top as f32 - metrics.descent,
+            left: m_glyph.left as f32,
+        });
+
+        let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Instance Buffer"),
+            contents: bytemuck::cast_slice(&screen.instance_data()),
+            usage: wgpu::BufferUsages::VERTEX,
         });
 
         let texture_bind_group_layout = device.create_bind_group_layout(
@@ -373,11 +517,10 @@ impl State {
 
         // Projection Uniform needs the metrics from the font (we should not have this as a
         // uniform)
-        let projection_uniform = ProjectionUniform::new(size.width, size.height, m_glyph.width as f32, m_glyph.height as f32);
         let projection_buffer = device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
                 label: Some("Projection Uniform"),
-                contents: bytemuck::cast_slice(&[projection_uniform]),
+                contents: bytemuck::cast_slice(&[screen.projection_uniform()]),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             }
             );
@@ -408,6 +551,55 @@ impl State {
             ],
         });
 
+        println!("{:?}", screen.projection_uniform());
+
+
+        let bg_render_pipeline_layout = 
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[
+                    &projection_bind_group_layout,
+                ],
+                push_constant_ranges: &[],
+            });
+
+        let bg_render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("BG Render Piepline"),
+            layout: Some(&bg_render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_bg",
+                buffers: &[Vertex::desc(), InstanceRaw::desc()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_bg",
+                targets: &[wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent::REPLACE,
+                        alpha: wgpu::BlendComponent::REPLACE,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                clamp_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+        });
+
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
@@ -417,6 +609,7 @@ impl State {
                 ],
                 push_constant_ranges: &[],
             });
+
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Piepline"),
@@ -462,12 +655,12 @@ impl State {
             config,
             size,
             render_pipeline,
+            bg_render_pipeline,
             vertex_buffer,
             index_buffer,
-            instances,
+            screen,
             instance_buffer,
             num_indices,
-            projection_uniform,
             projection_buffer,
             projection_bind_group,
             diffuse_bind_group,
@@ -481,11 +674,11 @@ impl State {
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
 
-            self.projection_uniform.update(new_size.width, new_size.height);
+            self.screen.update(new_size.width, new_size.height);
             self.queue.write_buffer(
                 &self.projection_buffer,
                 0,
-                bytemuck::cast_slice(&[self.projection_uniform]),
+                bytemuck::cast_slice(&[self.screen.projection_uniform()]),
                 );
         }
     }
@@ -506,8 +699,8 @@ impl State {
         });
 
         {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render Pass"),
+            let mut bg_render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("BG Render Pass"),
                 color_attachments: &[wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -524,16 +717,42 @@ impl State {
                 depth_stencil_attachment: None,
             });
 
+            // Render the backgrounds
+            bg_render_pass.set_pipeline(&self.bg_render_pipeline);
+            bg_render_pass.set_bind_group(0, &self.projection_bind_group, &[]);
+            bg_render_pass.set_bind_group(1, &self.diffuse_bind_group, &[]);
+            bg_render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            bg_render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+            bg_render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            bg_render_pass.draw_indexed(0..self.num_indices, 0, 0..self.screen.cells.len() as _);
+        }
+
+        {
+            // Draw the glyphs
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("FG Render Pass"),
+                color_attachments: &[wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: true,
+                    },
+                }],
+                depth_stencil_attachment: None,
+            });
+
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.projection_bind_group, &[]);
             render_pass.set_bind_group(1, &self.diffuse_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.draw_indexed(0..self.num_indices, 0, 0..self.instances.len() as _);
+            render_pass.draw_indexed(0..self.num_indices, 0, 0..self.screen.cells.len() as _);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
+
         output.present();
         Ok(())
     }
