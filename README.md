@@ -4,7 +4,7 @@ Inspired by [alacritty](https://github.com/alacritty/alacritty) and [refterm](ht
 
 ## Goals
 - [x] Render an array of cells
-- [ ] Render arbitrary text
+- [x] Render arbitrary text
 - [ ] Twitch Chat Rendering
 - [ ] Fast rendering performance
 - [ ] Low battery usage

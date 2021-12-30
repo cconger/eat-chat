@@ -77,7 +77,7 @@ fn vs_main(
   var translated: vec2<f32> = ((pos + size + cell_offset) * vec2<f32>(2.0/projection.size.x, -2.0/projection.size.y)) + vec2<f32>(-1.0, 1.0);
 
   out.color = instance.fg_color;
-  out.tex_coords = model.position;
+  out.tex_coords = (model.position * instance.tex_size) + instance.tex_offset;
   out.clip_position = vec4<f32>(translated, 0.0, 1.0);
   return out;
 }

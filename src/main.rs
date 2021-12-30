@@ -3,8 +3,11 @@ use winit::{
     event_loop::{ControlFlow, EventLoop},
     window::{Window, WindowBuilder},
 };
-use crossfont::{self, Rasterize, Rasterizer, BitmapBuffer, FontDesc, Style, Slant, Weight, Size, GlyphKey};
+use crossfont::{self, FontDesc, Style, Slant, Weight, Size, GlyphKey};
 use wgpu::util::DeviceExt;
+use crate::atlas::{Glyph, Atlas};
+
+mod atlas;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -56,6 +59,7 @@ const VERTICES: &[Vertex] = &[
     },
 ];
 
+// Makes two counterclockwise triangles out of the four points
 const INDICES: &[u16] = &[0,2,1,2,0,3];
 
 #[repr(C)]
@@ -134,6 +138,22 @@ impl Screen {
         }
     }
 
+    fn print_string(&mut self, atlas: &mut Atlas, f_k: crossfont::FontKey, d: &wgpu::Device, q: &wgpu::Queue, row: u32, col: u32, s: String) {
+        for (i, c) in s.chars().enumerate() {
+            self.cells.push(Cell {
+                col: col + i as u32,
+                row,
+                bg_color: [0.0, 0.0, 0.0],
+                fg_color: [1.0, 1.0, 1.0, 1.0],
+                glyph: atlas.get_glyph(d, q, GlyphKey {
+                    character: c,
+                    font_key: f_k,
+                    size: Size::new(20.0),
+                }).unwrap(),
+            });
+        }
+    }
+
     fn update(&mut self, width: u32, height: u32) {
         self.width = width;
         self.height = height;
@@ -158,10 +178,6 @@ struct Cell {
     bg_color: [f32;3],
     fg_color: [f32;4],
     glyph: Glyph,
-    top: f32,
-    left: f32,
-    width: f32,
-    height: f32,
 }
 
 
@@ -173,17 +189,9 @@ impl Cell {
             tex_size: [self.glyph.uv_width, self.glyph.uv_height],
             bg_color: self.bg_color,
             fg_color: self.fg_color,
-            position: [self.left, self.top, self.width, self.height],
+            position: [self.glyph.left, self.glyph.top, self.glyph.width, self.glyph.height],
         }
     }
-}
-
-struct Glyph {
-    key: GlyphKey,
-    uv_top: f32,
-    uv_left: f32,
-    uv_width: f32,
-    uv_height: f32,
 }
 
 
@@ -199,6 +207,7 @@ struct State {
     index_buffer: wgpu::Buffer,
     num_indices: u32,
     screen: Screen,
+    atlas: Box<Atlas>,
     instance_buffer: wgpu::Buffer,
     projection_buffer: wgpu::Buffer,
     projection_bind_group: wgpu::BindGroup,
@@ -206,7 +215,7 @@ struct State {
 }
 
 impl State {
-    async fn new(window: &Window) -> Self {
+    async fn new(window: &Window) -> State {
         let size = window.inner_size();
 
         let instance = wgpu::Instance::new(wgpu::Backends::all());
@@ -257,7 +266,7 @@ impl State {
 
         // Font Rendering
         let scale_factor = window.scale_factor() as f32;
-        let mut rasterizer = Rasterizer::new(scale_factor, true).unwrap();
+        let mut atlas = Box::new(Atlas::new(scale_factor));
 
         let font_desc = FontDesc::new::<String>(
             "SF Mono".into(),
@@ -265,11 +274,8 @@ impl State {
                 slant: Slant::Normal,
                 weight: Weight::Normal,
             });
-        let font_size = Size::new(20.0);
-        let regular = rasterizer.load_font(&font_desc, font_size).unwrap();
-        let gk = GlyphKey { font_key: regular, character: 'm', size: font_size };
-        let m_glyph = rasterizer.get_glyph(gk).unwrap();
-        let metrics = rasterizer.metrics(regular, font_size).unwrap();
+
+        let (regular, metrics) = atlas.load_font(&font_desc, 20.0);
         println!("Average Advance: {}", metrics.average_advance);
         println!("Line Height    : {}", metrics.line_height);
         println!("Descent        : {}", metrics.descent);
@@ -278,90 +284,8 @@ impl State {
         println!("Strikeout Pos  : {}", metrics.strikeout_position);
         println!("Strikeout Thick: {}", metrics.strikeout_thickness);
 
-        println!("Glyph {} Width : {}", m_glyph.character, m_glyph.width);
-        println!("Glyph {} Height: {}", m_glyph.character, m_glyph.height);
-        println!("Glyph {} Top   : {}", m_glyph.character, m_glyph.top);
-        println!("Glyph {} Left  : {}", m_glyph.character, m_glyph.left);
-
-        // Load m_glyph as a texture
-        let texture_size = wgpu::Extent3d {
-            width: m_glyph.width as u32,
-            height: m_glyph.height as u32,
-            depth_or_array_layers: 1,
-        };
-        let diffuse_texture = device.create_texture(
-            &wgpu::TextureDescriptor {
-                // All textures are stored as 3D, we represent our 2D texture
-                // by setting depth to 1.
-                size: texture_size,
-                mip_level_count: 1, 
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                // Most images are stored using sRGB so we need to reflect that here.
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                // TEXTURE_BINDING tells wgpu that we want to use this texture in shaders
-                // COPY_DST means that we want to copy data to this texture
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                label: Some("glyph_texture"),
-            }
-        );
-
-        let buff = match m_glyph.buffer {
-            BitmapBuffer::Rgba(v) => {
-                println!("Format: RGBA");
-                v
-            },
-            BitmapBuffer::Rgb(v) => {
-                println!("Format: RGB");
-                let mut new_buff = Vec::with_capacity((v.len() / 3) * 4);
-                for chunk in v.chunks(3) {
-                    match chunk {
-                        &[r,g,b] => {
-                            new_buff.push(r);
-                            new_buff.push(g);
-                            new_buff.push(b);
-                            new_buff.push(std::cmp::max(std::cmp::max(r,g),b));
-                        }
-                        _ => println!("Not chunk aligned"),
-                    }
-                }
-
-                new_buff
-            },
-        };
-
-        //println!("Glyph {} Buffer Len: {}", m_glyph.character, buff.len());
-        //println!("Glyph {} Buffer: {:?}", m_glyph.character, buff);
-
-        queue.write_texture(
-            // Tells wgpu where to copy the pixel data
-            wgpu::ImageCopyTexture {
-                texture: &diffuse_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            // The actual pixel data
-            &buff,
-            // The layout of the texture
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: std::num::NonZeroU32::new(4 * m_glyph.width as u32),
-                rows_per_image: std::num::NonZeroU32::new(m_glyph.height as u32),
-            },
-            texture_size,
-            );
-
-        let diffuse_texture_view = diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let diffuse_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
+        let diffuse_texture_view = atlas.texture_view(&device);
+        let diffuse_sampler = atlas.sampler(&device);
 
         let mut screen = Screen::new(
             0,0,
@@ -376,17 +300,11 @@ impl State {
             row: 1,
             bg_color: [0.0,0.0,0.0],
             fg_color: [1.0,0.0,0.0,1.0],
-            glyph: Glyph {
-                key: gk,
-                uv_top: 0.0,
-                uv_left: 0.0,
-                uv_height: 1.0,
-                uv_width: 1.0,
-            },
-            width: m_glyph.width as f32,
-            height: m_glyph.height as f32,
-            top: m_glyph.top as f32 - metrics.descent,
-            left: m_glyph.left as f32,
+            glyph: atlas.get_glyph(&device, &queue, GlyphKey {
+                character: 'b',
+                font_key: regular,
+                size: Size::new(20.0),
+            }).unwrap(),
         };
 
         println!("Middle Cell: {:?}", middle_cell.to_instance());
@@ -396,34 +314,22 @@ impl State {
             row: 0,
             bg_color: [0.0,0.0,0.0],
             fg_color: [1.0,1.0,1.0,1.0],
-            glyph: Glyph {
-                key: gk,
-                uv_top: 0.0,
-                uv_left: 0.0,
-                uv_height: 1.0,
-                uv_width: 1.0,
-            },
-            width: m_glyph.width as f32,
-            height: m_glyph.height as f32,
-            top: m_glyph.top as f32 - metrics.descent,
-            left: m_glyph.left as f32,
+            glyph: atlas.get_glyph(&device, &queue, GlyphKey {
+                character: 'u',
+                font_key: regular,
+                size: Size::new(20.0),
+            }).unwrap(),
         });
         screen.cells.push(Cell {
             col: 0,
             row: 1,
             bg_color: [0.0,0.0,0.0],
             fg_color: [1.0,1.0,1.0,0.5],
-            glyph: Glyph {
-                key: gk,
-                uv_top: 0.0,
-                uv_left: 0.0,
-                uv_height: 1.0,
-                uv_width: 1.0,
-            },
-            width: m_glyph.width as f32,
-            height: m_glyph.height as f32,
-            top: m_glyph.top as f32 - metrics.descent,
-            left: m_glyph.left as f32,
+            glyph: atlas.get_glyph(&device, &queue, GlyphKey {
+                character: 'a',
+                font_key: regular,
+                size: Size::new(20.0),
+            }).unwrap(),
         });
         screen.cells.push(middle_cell);
         screen.cells.push(Cell {
@@ -431,35 +337,25 @@ impl State {
             row: 1,
             bg_color: [0.0,0.0,0.0],
             fg_color: [1.0,1.0,1.0,0.5],
-            glyph: Glyph {
-                key: gk,
-                uv_top: 0.0,
-                uv_left: 0.0,
-                uv_height: 1.0,
-                uv_width: 1.0,
-            },
-            width: m_glyph.width as f32,
-            height: m_glyph.height as f32,
-            top: m_glyph.top as f32 - metrics.descent,
-            left: m_glyph.left as f32,
+            glyph: atlas.get_glyph(&device, &queue, GlyphKey {
+                character: 'c',
+                font_key: regular,
+                size: Size::new(20.0),
+            }).unwrap(),
         });
         screen.cells.push(Cell {
             col: 1,
             row: 2,
             bg_color: [0.0,0.0,0.0],
             fg_color: [1.0,1.0,1.0,0.5],
-            glyph: Glyph {
-                key: gk,
-                uv_top: 0.0,
-                uv_left: 0.0,
-                uv_height: 1.0,
-                uv_width: 1.0,
-            },
-            width: m_glyph.width as f32,
-            height: m_glyph.height as f32,
-            top: m_glyph.top as f32 - metrics.descent,
-            left: m_glyph.left as f32,
+            glyph: atlas.get_glyph(&device, &queue, GlyphKey {
+                character: 'd',
+                font_key: regular,
+                size: Size::new(20.0),
+            }).unwrap(),
         });
+
+        screen.print_string(&mut atlas, regular, &device, &queue, 3, 3, "Hello world!".to_string());
 
         let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Instance Buffer"),
@@ -512,7 +408,7 @@ impl State {
                 ],
                 label: Some("diffuse_bind_group"),
             }
-            );
+        );
 
 
         // Projection Uniform needs the metrics from the font (we should not have this as a
@@ -648,7 +544,7 @@ impl State {
             },
         });
 
-        Self {
+        State {
             surface,
             device,
             queue,
@@ -659,6 +555,7 @@ impl State {
             vertex_buffer,
             index_buffer,
             screen,
+            atlas,
             instance_buffer,
             num_indices,
             projection_buffer,
@@ -720,7 +617,6 @@ impl State {
             // Render the backgrounds
             bg_render_pass.set_pipeline(&self.bg_render_pipeline);
             bg_render_pass.set_bind_group(0, &self.projection_bind_group, &[]);
-            bg_render_pass.set_bind_group(1, &self.diffuse_bind_group, &[]);
             bg_render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             bg_render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
             bg_render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
