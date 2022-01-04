@@ -1,4 +1,5 @@
 use std::env;
+use std::time::{Instant, Duration};
 use winit::{
     event::*,
     event_loop::{ControlFlow, EventLoop},
@@ -8,6 +9,7 @@ use crossfont::{self, FontDesc, Style, Slant, Weight, Size, GlyphKey};
 use wgpu::util::DeviceExt;
 use crate::atlas::{Glyph, Atlas};
 use tokio::runtime::Builder;
+use ringbuf::RingBuffer;
 
 mod atlas;
 mod chat;
@@ -708,7 +710,6 @@ fn main() {
 
     let mut state = runtime.block_on(State::new(&window));
 
-
     let token = match env::var("TOKEN") {
         Ok(t) => t,
         Err(e) => {
@@ -724,13 +725,17 @@ fn main() {
         }
     };
 
+    // TODO: Replace this ring buffer, it doesn't actually work the way I want: overwriting input
+    // as it comes in.
+    let rb = RingBuffer::<String>::new(10);
+    let (prod, mut cons) = rb.split();
+
     if token != "" && nick != "" {
-        let _handle = runtime.spawn(chat::read_chat(token, nick));
+        let _handle = runtime.spawn(chat::read_chat(token, nick, prod));
     }
 
-
     event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
+        *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(1));
 
         match event {
             Event::WindowEvent {
@@ -773,8 +778,16 @@ fn main() {
             Event::MainEventsCleared => {
                 //window.request_redraw();
             },
+            Event::NewEvents(StartCause::ResumeTimeReached {
+                start: _t,
+                requested_resume: _r,
+            }) => {
+                // Drain the ring buffer
+                while let Some(v) = cons.pop() {
+                    println!("Message: {}", v);
+                }
+            }
             _ => {}
         }
     });
-
 }

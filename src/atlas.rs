@@ -29,7 +29,7 @@ pub struct Atlas {
     v_size: u32,
 }
 
-const DEFAULT_TEXTURE_SIZE: u32 = 4096;
+const DEFAULT_TEXTURE_SIZE: u32 = 1024;
 
 impl Atlas {
     pub fn new(scale_factor: f32) -> Self {
