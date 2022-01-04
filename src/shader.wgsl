@@ -1,5 +1,4 @@
 
-[[block]]
 struct ProjectionUniform {
   cell_dim: vec2<f32>;
   size: vec2<f32>;

@@ -379,14 +379,7 @@ impl State {
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
                         visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler {
-                            // This is only for TextureSampleType::Depth
-                            comparison: false,
-                            // This should be true if the sample_type of the texture is:
-                            //     TextureSampleType::Float { filterable: true }
-                            // Otherwise you'll get an error.
-                            filtering: true,
-                        },
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
                     ],
@@ -485,7 +478,7 @@ impl State {
                 front_face: wgpu::FrontFace::Ccw,
                 cull_mode: None,
                 polygon_mode: wgpu::PolygonMode::Fill,
-                clamp_depth: false,
+                unclipped_depth: false,
                 conservative: false,
             },
             depth_stencil: None,
@@ -494,6 +487,7 @@ impl State {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
+            multiview: None,
         });
 
         let render_pipeline_layout =
@@ -533,7 +527,7 @@ impl State {
                 front_face: wgpu::FrontFace::Ccw,
                 cull_mode: None,
                 polygon_mode: wgpu::PolygonMode::Fill,
-                clamp_depth: false,
+                unclipped_depth: false,
                 conservative: false,
             },
             depth_stencil: None,
@@ -542,6 +536,7 @@ impl State {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
+            multiview: None,
         });
 
         State {
@@ -580,8 +575,44 @@ impl State {
         }
     }
 
-    fn input(&mut self, _event: &WindowEvent) -> bool {
-        false
+    fn input(&mut self, event: &WindowEvent) -> bool {
+        match event {
+            WindowEvent::KeyboardInput {
+                input: KeyboardInput {
+                    state: ElementState::Pressed,
+                    virtual_keycode: Some(k),
+                    ..
+                },
+                ..
+            } => {
+                match k {
+                    VirtualKeyCode::A => {
+                        let font_desc = FontDesc::new::<String>(
+                            "SF Mono".into(),
+                            Style::Description{
+                                slant: Slant::Normal,
+                                weight: Weight::Normal,
+                            });
+                        let (regular, _) = self.atlas.load_font(&font_desc, 20.0);
+                        self.screen.print_string(&mut self.atlas, regular, &self.device, &self.queue, 3, 4, "a".to_string());
+                        return true;
+                    }
+                    VirtualKeyCode::B => {
+                        let font_desc = FontDesc::new::<String>(
+                            "SF Mono".into(),
+                            Style::Description{
+                                slant: Slant::Normal,
+                                weight: Weight::Normal,
+                            });
+                        let (regular, _) = self.atlas.load_font(&font_desc, 20.0);
+                        self.screen.print_string(&mut self.atlas, regular, &self.device, &self.queue, 3, 4, "b".to_string());
+                        return true;
+                    }
+                    _ => { return false; }
+                }
+            }
+            _ => return false,
+        }
     }
 
     fn update(&mut self) {
