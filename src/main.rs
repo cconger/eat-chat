@@ -1,3 +1,4 @@
+use std::env;
 use winit::{
     event::*,
     event_loop::{ControlFlow, EventLoop},
@@ -6,8 +7,10 @@ use winit::{
 use crossfont::{self, FontDesc, Style, Slant, Weight, Size, GlyphKey};
 use wgpu::util::DeviceExt;
 use crate::atlas::{Glyph, Atlas};
+use tokio::runtime::Builder;
 
 mod atlas;
+mod chat;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -207,7 +210,7 @@ struct State {
     index_buffer: wgpu::Buffer,
     num_indices: u32,
     screen: Screen,
-    atlas: Box<Atlas>,
+    atlas: Atlas,
     instance_buffer: wgpu::Buffer,
     projection_buffer: wgpu::Buffer,
     projection_bind_group: wgpu::BindGroup,
@@ -266,7 +269,7 @@ impl State {
 
         // Font Rendering
         let scale_factor = window.scale_factor() as f32;
-        let mut atlas = Box::new(Atlas::new(scale_factor));
+        let mut atlas = Atlas::new(scale_factor);
 
         let font_desc = FontDesc::new::<String>(
             "SF Mono".into(),
@@ -275,8 +278,7 @@ impl State {
                 weight: Weight::Normal,
             });
 
-        let (regular, metrics) = atlas.load_font(&font_desc, 20.0);
-        println!("Average Advance: {}", metrics.average_advance);
+        let (regular, metrics) = atlas.load_font(&font_desc, 20.0); println!("Average Advance: {}", metrics.average_advance);
         println!("Line Height    : {}", metrics.line_height);
         println!("Descent        : {}", metrics.descent);
         println!("Underline Pos  : {}", metrics.underline_position);
@@ -360,7 +362,7 @@ impl State {
         let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Instance Buffer"),
             contents: bytemuck::cast_slice(&screen.instance_data()),
-            usage: wgpu::BufferUsages::VERTEX,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
 
         let texture_bind_group_layout = device.create_bind_group_layout(
@@ -594,7 +596,7 @@ impl State {
                                 weight: Weight::Normal,
                             });
                         let (regular, _) = self.atlas.load_font(&font_desc, 20.0);
-                        self.screen.print_string(&mut self.atlas, regular, &self.device, &self.queue, 3, 4, "a".to_string());
+                        self.screen.print_string(&mut self.atlas, regular, &self.device, &self.queue, 4, 3, "a".to_string());
                         return true;
                     }
                     VirtualKeyCode::B => {
@@ -605,7 +607,7 @@ impl State {
                                 weight: Weight::Normal,
                             });
                         let (regular, _) = self.atlas.load_font(&font_desc, 20.0);
-                        self.screen.print_string(&mut self.atlas, regular, &self.device, &self.queue, 3, 4, "b".to_string());
+                        self.screen.print_string(&mut self.atlas, regular, &self.device, &self.queue, 4, 3, "b".to_string());
                         return true;
                     }
                     _ => { return false; }
@@ -616,6 +618,14 @@ impl State {
     }
 
     fn update(&mut self) {
+        // TODO: This is terrible, we should only alloc if we need a bigger buffer.
+        let new_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Instance Buffer"),
+            contents: bytemuck::cast_slice(&self.screen.instance_data()),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        self.instance_buffer = new_buffer;
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -689,7 +699,35 @@ fn main() {
     env_logger::init();
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new().build(&event_loop).unwrap();
-    let mut state = pollster::block_on(State::new(&window));
+
+    let runtime = Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let mut state = runtime.block_on(State::new(&window));
+
+
+    let token = match env::var("TOKEN") {
+        Ok(t) => t,
+        Err(e) => {
+            println!("No TOKEN set, will not connect to chat: {}", e);
+            "".to_string()
+        }
+    };
+    let nick = match env::var("NICK") {
+        Ok(n) => n,
+        Err(e) => {
+            println!("No NICK set, will not connect to chat: {}", e);
+            "".to_string()
+        }
+    };
+
+    if token != "" && nick != "" {
+        let _handle = runtime.spawn(chat::read_chat(token, nick));
+    }
+
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -719,6 +757,8 @@ fn main() {
                     },
                     _ => {}
                 }
+            } else {
+                window.request_redraw();
             },
             Event::RedrawRequested(_) => {
                 println!("redraw");
@@ -736,4 +776,5 @@ fn main() {
             _ => {}
         }
     });
+
 }
