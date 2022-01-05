@@ -580,6 +580,7 @@ dependencies = [
  "image",
  "log",
  "rand",
+ "regex",
  "ringbuf",
  "tokio",
  "tokio-tungstenite",

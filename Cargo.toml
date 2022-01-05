@@ -21,3 +21,4 @@ tokio-tungstenite = { version = "0.16", features = [ "native-tls" ] }
 url = "2.2"
 futures-util = "0.3"
 ringbuf = "0.2.6"
+regex = "1.5.4"

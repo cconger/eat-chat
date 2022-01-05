@@ -51,7 +51,7 @@ impl Atlas {
     pub fn load_font(&mut self, font: &FontDesc, size: f32) -> (FontKey, Metrics) {
         let font_size = Size::new(size);
         let regular = self.rasterizer.load_font(font, font_size).unwrap();
-        let gk = GlyphKey { font_key: regular, character: 'm', size: font_size };
+        let _gk = GlyphKey { font_key: regular, character: 'm', size: font_size };
 
         let metrics =  self.rasterizer.metrics(regular, font_size).unwrap();
         self.row_height = metrics.line_height as u32;
@@ -180,6 +180,7 @@ impl Atlas {
         return (self.h_offset, self.v_offset);
     }
 
+    #[allow(dead_code)]
     pub fn set_scale_factor(&mut self, scale_factor: f32) {
         self.rasterizer.update_dpr(scale_factor);
     }
